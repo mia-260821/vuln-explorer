@@ -1,0 +1,11 @@
+
+
+data/
+.venv/
+.vscode/
+.streamlit/
+.pycache/
+**/__pycache__/
+.env
+.env.**
+Dockerfile.langfuse.yml

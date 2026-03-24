@@ -1,0 +1,191 @@
+
+services:
+  app:
+    image: vuln-explorer-app:langfuse
+    container_name: vuln-explorer-app
+    depends_on:
+      - qdrant
+      - langfuse
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: vulnerabilities
+      APP_SERVER: streamlit
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8501"
+      LANGFUSE_HOST: http://langfuse:3000
+    ports:
+      - "8501:8501"
+      - "8000:8000"
+    volumes:
+      - ./:/app
+    env_file:
+      - .env.dev
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vuln-explorer-ingestion
+    depends_on:
+      - qdrant
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: vulnerabilities
+    volumes:
+      - ./:/app
+    env_file:
+      - .env.dev
+    entrypoint: ["/usr/local/bin/ingest-entrypoint.sh"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+  
+  langfuse:
+    image: langfuse/langfuse:latest
+    container_name: langfuse-web
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=mysecret123456789
+      - SALT=mysalt
+      - ENCRYPTION_KEY=31d548a2952ac600b230e7fd1368dcf127beb8be35bb9b1da6dd8809709f092c
+      - DATABASE_URL=postgresql://user:password@postgres:5432/agent_db
+      - TELEMETRY_ENABLED=false
+      # for langfuse > 2
+      # Clickhouse
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=password
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_MIGRATION_URL=clickhouse://default:password@clickhouse:9000
+      - CLICKHOUSE_CLUSTER_ENABLED=false
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_AUTH=
+      # Object storage
+      - LANGFUSE_S3_EVENT_UPLOAD_BUCKET=langfuse
+      - LANGFUSE_S3_EVENT_UPLOAD_REGION=us-east-1
+      - LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID=minioadmin
+      - LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=minioadminpassword
+      - LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE=true
+      - LANGFUSE_S3_EVENT_UPLOAD_PREFIX=events
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:latest
+    container_name: langfuse-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=mysecret123456789
+      - SALT=mysalt
+      - ENCRYPTION_KEY=31d548a2952ac600b230e7fd1368dcf127beb8be35bb9b1da6dd8809709f092c
+      - DATABASE_URL=postgresql://user:password@postgres:5432/agent_db
+      - TELEMETRY_ENABLED=false
+      # for langfuse > 2
+      # Clickhouse
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=password
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_CLUSTER_ENABLED=false
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_AUTH=
+      # Object storage
+      - LANGFUSE_S3_EVENT_UPLOAD_BUCKET=langfuse
+      - LANGFUSE_S3_EVENT_UPLOAD_REGION=us-east-1
+      - LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID=minioadmin
+      - LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=minioadminpassword
+      - LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
+      - LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE=true
+      - LANGFUSE_S3_EVENT_UPLOAD_PREFIX=events
+
+
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg18-trixie # Pre-installed pgvector extension
+    container_name: postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: agent_dbs
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d agent_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgre_storeage:/var/lib/postgresql
+  
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.2-alpine
+    container_name: clickhouse
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=password
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s # Gives ClickHouse time to initialize its internal data
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --save 60 1 --loglevel warning --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadminpassword
+      MINIO_SITE_REGION: us-east-1
+      MINIO_SITE_NAME: us-east-1
+      MINIO_REGION: us-east-1 
+    ports:
+      - 9001:9001
+      - 9000:9000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  qdrant_storage:
+  postgre_storeage:
