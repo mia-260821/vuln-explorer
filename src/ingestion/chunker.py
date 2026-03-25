@@ -26,15 +26,20 @@ def record_to_document(record: VulnerabilityRecord) -> Document:
     metadata: dict[str, Any] = {
         "source_id": record.source_id,
         "severity": record.severity,
+        "cvss_score": record.cvss_score,
         "platform": record.platform,
         "is_exploited": record.is_exploited,
+        "references": record.references,
     }
+    metadata.update(record.metadata)
     platform_text = ", ".join(record.platform) if record.platform else "unknown"
-    context_header = (
-        f"Source ID: {record.source_id}"
-        f"Severity: {record.severity}"
-        f"Platform: {platform_text}"
-    ).join(" | ")
+    context_header = " | ".join(
+        [
+            f"Source ID: {record.source_id}",
+            f"Severity: {record.severity}",
+            f"Platform: {platform_text}",
+        ]
+    )
     return Document(
         page_content=f"{context_header}\nSummary: {record.summary}\n\nDetails: {record.details}".strip(),
         metadata=metadata,

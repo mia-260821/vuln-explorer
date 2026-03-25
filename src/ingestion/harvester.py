@@ -8,17 +8,17 @@ from typing import Any, Optional
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
-from langchain_core.vectorstores import VectorStore
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-from config import AppConfig
 from langchain_core.documents import Document
+from langchain_core.vectorstores import VectorStore
 from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams
-from src.core.factory import get_embedding_dimension
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from ingestion.chunker import chunk_record
+from models import VulnerabilityRecord
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_CHUNK_SIZE = 1000
 
 
 class NvdHarvester:
@@ -39,6 +39,7 @@ class NvdHarvester:
         self,
         vectorstore: VectorStore,
         http_client: Optional[httpx.AsyncClient] = None,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
     ) -> None:
         """Initialize the NVD harvester.
 
@@ -52,6 +53,7 @@ class NvdHarvester:
         """
         self._http_client = http_client
         self._vector_store = vectorstore
+        self._chunk_size = chunk_size
 
     async def fetch_documents(self, keyword_search: Optional[str] = None) -> list[Document]:
         """Fetch CVEs from the NVD API and map them into LangChain documents.
@@ -83,7 +85,10 @@ class NvdHarvester:
                 await client.aclose()
 
         vulnerabilities = payload.get("vulnerabilities", [])
-        return [self._cve_to_document(item) for item in vulnerabilities]
+        documents: list[Document] = []
+        for item in vulnerabilities:
+            documents.extend(self._cve_to_documents(item))
+        return documents
     
 
     @retry(
@@ -146,33 +151,63 @@ class NvdHarvester:
             the same vulnerability record instead of producing duplicates.
         """
 
+        chunk_id = document.metadata.get("chunk_id")
+        if chunk_id:
+            return str(chunk_id)
         cve_id = document.metadata.get("cve_id")
         if cve_id:
             return str(uuid5(NAMESPACE_URL, f"cve:{cve_id}"))
         return str(uuid5(NAMESPACE_URL, document.page_content))
 
-    def _cve_to_document(self, item: dict[str, Any]) -> Document:
-        """Convert a single NVD CVE item into a LangChain document.
+    def _cve_to_documents(self, item: dict[str, Any]) -> list[Document]:
+        """Convert a single NVD CVE item into chunked LangChain documents.
 
         Input:
             A vulnerability item from the NVD API response.
         Output:
-            Returns a LangChain `Document` with CVE description and metadata.
+            Returns chunked LangChain `Document` objects with CVE metadata.
         Security context:
-            Preserves CVE identifiers, CVSS data, and affected software version
-            fields so retrieval remains verifiable and filterable.
+            Preserves CVE identifiers, CVSS data, affected software version
+            fields, and reference URLs so retrieval remains verifiable and
+            filterable after chunking.
+        """
+
+        record = self._cve_to_record(item=item)
+        chunks = chunk_record(record=record, chunk_size=self._chunk_size)
+        return [
+            Document(page_content=chunk.text, metadata={**chunk.metadata, "chunk_id": chunk.chunk_id})
+            for chunk in chunks
+        ]
+
+    def _cve_to_record(self, item: dict[str, Any]) -> VulnerabilityRecord:
+        """Convert a single NVD CVE item into a normalized vulnerability record.
+
+        Input:
+            A vulnerability item from the NVD API response.
+        Output:
+            Returns a `VulnerabilityRecord` suitable for shared chunking logic.
+        Security context:
+            Normalizes untrusted API fields into the canonical ingestion model
+            so all indexed content flows through one metadata-preserving path.
         """
 
         cve = item.get("cve", {})
-        cve_id = cve.get("id", "unknown-cve")
+        cve_id = str(cve.get("id", "unknown-cve"))
         descriptions = cve.get("descriptions", [])
         description = self._first_english_description(descriptions=descriptions)
         metrics = cve.get("metrics", {})
         cvss = self._extract_cvss(metrics=metrics)
         versions = self._extract_software_versions(configurations=cve.get("configurations", []))
+        references = self._extract_references(cve.get("references", []))
 
-        return Document(
-            page_content=description,
+        return VulnerabilityRecord(
+            source_id=cve_id,
+            summary=description,
+            details=description,
+            severity=self._cvss_to_severity(cvss),
+            cvss_score=cvss,
+            platform=versions,
+            references=references,
             metadata={
                 "source": "nvd",
                 "cve_id": cve_id,
@@ -180,6 +215,52 @@ class NvdHarvester:
                 "software_versions": versions,
             },
         )
+
+    def _extract_references(self, references: list[dict[str, Any]]) -> list[str]:
+        """Extract NVD reference URLs from a CVE item.
+
+        Input:
+            The NVD references array for a CVE item.
+        Output:
+            Returns a de-duplicated list of advisory or vendor reference URLs.
+        Security context:
+            Keeps retrievable source links attached to the ingested record so
+            downstream answers can cite authoritative remediation context.
+        """
+
+        urls: list[str] = []
+        for reference in references:
+            url = reference.get("url")
+            if not url:
+                continue
+            text = str(url)
+            if text not in urls:
+                urls.append(text)
+        return urls
+
+    def _cvss_to_severity(self, cvss: Optional[float]) -> str:
+        """Map a CVSS score to an NVD-style severity label.
+
+        Input:
+            An optional CVSS base score.
+        Output:
+            Returns a normalized severity label for chunk metadata and headers.
+        Security context:
+            Derives severity from authoritative NVD scoring to avoid storing
+            unverified qualitative labels from external transformations.
+        """
+
+        if cvss is None:
+            return "UNKNOWN"
+        if cvss >= 9.0:
+            return "CRITICAL"
+        if cvss >= 7.0:
+            return "HIGH"
+        if cvss >= 4.0:
+            return "MEDIUM"
+        if cvss > 0.0:
+            return "LOW"
+        return "NONE"
 
     def _first_english_description(self, descriptions: list[dict[str, Any]]) -> str:
         """Select the first English CVE description from the NVD payload.
@@ -244,4 +325,3 @@ class NvdHarvester:
                         if text not in versions:
                             versions.append(text)
         return versions
-
