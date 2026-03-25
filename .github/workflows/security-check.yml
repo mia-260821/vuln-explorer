@@ -1,0 +1,41 @@
+
+name: Python Security Scan
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # This tool checks your requirements for known supply chain attacks
+      - name: Run pip-audit
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: requirements.txt
+
+      # # 2. Snyk: Advanced CVE and zero-day detection
+      # # Note: Requires SNYK_TOKEN in your GitHub Repository Secrets
+      # - name: Run Snyk to check for vulnerabilities
+      #   uses: snyk/actions/python@master
+      #   env:
+      #     SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      #   with:
+      #     args: --file=requirements.txt
+
+      # 3. GuardDog: Scans for malicious behavior (obfuscation, exfiltration)
+      - name: Install and Run GuardDog
+        run: |
+          pip install guarddog
+          guarddog pypi verify requirements.txt
