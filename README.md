@@ -8,11 +8,20 @@
 
 ### System Architecture
 
-The system follows a "Plan-Execute-Verify" loop 
+The system follows a "Plan-Execute-Verify" loop  
+<figure>
+  <figcaption>workflow</figcaption>
+  <img src="workflow.png" style="width: 60%;">
+</figure>
 
-**Workflow diagram**
-<img src="diagram.png" style="width: 70%;">
 
-**User interface**
-<img src="ui.png" style="width: 70%;">
+<figure>
+  <figcaption>UI</figcaption>
+  <img src="ui.png" style="width: 60%;">
+</figure>
+
+<figure>
+  <figcaption>Langfuse</figcaption>
+  <img src="langfuse.png" style="width: 60%;">
+</figure>
 
