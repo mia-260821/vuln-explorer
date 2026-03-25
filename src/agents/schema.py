@@ -2,7 +2,6 @@
 
 import operator
 from typing import Annotated, Literal, Optional, TypedDict
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field

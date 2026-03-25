@@ -10,4 +10,9 @@
 
 The system follows a "Plan-Execute-Verify" loop 
 
-<img src="diagram.png" style="width: 70%; display: block; margin-left: auto; margin-right: auto;">
+**Workflow diagram**
+<img src="diagram.png" style="width: 70%;">
+
+**User interface**
+<img src="ui.png" style="width: 70%;">
+

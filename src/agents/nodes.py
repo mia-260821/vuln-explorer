@@ -28,12 +28,21 @@ def build_rewrite_query_node(llm: BaseChatModel):
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", (
-                "You are a Security Research Assistant. Your task is to rewrite user "
-                "input into a concise, technical search query for a vulnerability database.\n"
-                "Focus on: Software Name, Version Numbers, and Attack Vectors (RCE, SQLi, etc.).\n"
-                "Output ONLY the optimized search string. No conversational filler."
+                "You rewrite cybersecurity questions into a concise retrieval query for this system's "
+                "vulnerability corpus and NVD fallback search.\n"
+                "Preserve the user's intent and keep only the most useful search terms.\n"
+                "Include exact product names, vendors, versions, CVE IDs, operating systems, and "
+                "software stack terms when they are present.\n"
+                "Do not invent exploit types, CVE IDs, products, versions, or remediation steps that "
+                "the user did not mention.\n"
+                "If the user asks a broad question, keep the query broad but security-focused.\n"
+                "Output only a single rewritten search query string."
             )),
-            ("human", "{query}"),
+            ("human", (
+                "User question: {query}\n"
+                "Operating system: {operating_system}\n"
+                "Software stack: {software_stack}"
+            )),
         ]
     )
 
@@ -53,7 +62,15 @@ def build_rewrite_query_node(llm: BaseChatModel):
         """
 
         query = state.get("query", "")
-        rewritten_query = await chain.ainvoke({"query": query})
+        operating_system = state.get("operating_system") or "unspecified"
+        software_stack = ", ".join(state.get("software_stack", [])) or "unspecified"
+        rewritten_query = await chain.ainvoke(
+            {
+                "query": query,
+                "operating_system": operating_system,
+                "software_stack": software_stack,
+            }
+        )
 
         messages = list(state.get("messages", []))
         messages.append(HumanMessage(content=query))
@@ -90,21 +107,22 @@ def build_retrieve_vulnerabilities_node(vectorstore: VectorStore):
             Uses Qdrant only as a read-only retriever so inference cannot modify
             indexed vulnerability intelligence.
         """
-        if state.get("fallback_attempted"):
-            live_nvd_documents = state.get("live_nvd_documents", [])
-            retrieved_documents = _merge_documents(
-                primary_documents=retrieved_documents,
-                secondary_documents=live_nvd_documents,
-            )
 
         from retrieval.base import SearchRequest, run_base_search
 
-        search_req = SearchRequest(k=5)
-        search_req.query = state.get("rewritten_query")
+        search_req = SearchRequest(query=state.get("rewritten_query"))
         if state.get("operating_system"):
             search_req.filters["platform"] = state.get("operating_system")
 
         documents = await run_base_search(vectorstore, search_req)
+
+        if state.get("fallback_attempted"):
+            live_nvd_documents = state.get("live_nvd_documents", [])
+            documents = _merge_documents(
+                primary_documents=documents,
+                secondary_documents=live_nvd_documents,
+            )
+
         return {
             **state,
             "retrieved_documents": documents,
@@ -162,7 +180,7 @@ def build_grade_documents_node(llm: BaseChatModel):
         result: GradeDecision = await chain.ainvoke({"document": doc_txt, "query": user_intent})
     
         relevance = "relevant" if result.binary_score == "yes" else "irrelevant"
-        graded_documents = docs if relevance == 'relevance' else []
+        graded_documents = docs if relevance == 'relevant' else []
         return {
             **state,
             "graded_documents": graded_documents,
@@ -244,17 +262,10 @@ def build_generate_remediation_node(llm: BaseChatModel):
     """
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", (
-            "You are a Senior Security Engineer. Use the following CVE context to answer the user's query.\n\n"
-            "CONTEXT:\n{context}\n\n"
-            "USER QUERY: {input}\n\n"
-            "Format your response as follows:\n"
-            "### ⚠️ Risk Assessment\n(Briefly explain the danger)\n"
-            "### 🛠 Remediation Steps\n(List terminal commands or config changes)\n"
-            "### 🔗 References\n(List the CVE IDs used)"
-        ))
+        ("system", "You are a Senior Security Engineer. Use the context below to answer.\n\nCONTEXT:\n{context}"),
+        ("human", "{input}")
     ])
-    combine_chain = create_stuff_documents_chain(llm=llm, prompt=prompt)
+    combine_chain = create_stuff_documents_chain(llm, prompt)
 
     async def generate_remediation(state: AgentState) -> AgentState:
         """Generate the final remediation response from grounded evidence.

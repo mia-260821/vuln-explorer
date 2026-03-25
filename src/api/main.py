@@ -7,7 +7,6 @@ import os
 from typing import Any
 import uuid
 
-from agents.graph import run_agent_graph
 from config import AppConfig
 from fastapi import FastAPI
 from langchain_core.documents import Document
@@ -15,6 +14,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 from langfuse import Langfuse
+from agents.usecase import run_agent_graph
 
 langfuse = Langfuse(
     public_key=os.environ['LANGFUSE_PUBLIC_KEY'],
@@ -102,11 +102,13 @@ async def chat(request: QueryRequest) -> ChatResponse:
         Invokes the read-only LangGraph inference workflow and returns grounded
         evidence alongside the final answer for inspection.
     """
-    session_id = str(uuid.uuid4())
+    trace_id = Langfuse.create_trace_id()
     config = AppConfig()
     result = await run_agent_graph(
         state={"query": request.message, "software_stack": []},
         config=config,
+        invoke_config={},
+        trace_id=trace_id,
     )
     documents = [_serialize_document(document) for document in result.get("retrieved_documents", [])]
     return ChatResponse(

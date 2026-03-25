@@ -8,7 +8,6 @@ import json
 
 from agents.usecase import run_agent_graph
 from config import AppConfig
-from ingestion.harvester import run_ingestion
 from ingestion.usecase import build_nvd_harvester
 
 
