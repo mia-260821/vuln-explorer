@@ -9,11 +9,11 @@ from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from retrieval.vectorstore import QdrantVectorStoreClient
+from langchain_core.vectorstores import VectorStore
 from agents.schema import AgentState, GradeDecision
 
 
-def build_rewrite_query_node(fast_llm: BaseChatModel):
+def build_rewrite_query_node(llm: BaseChatModel):
     """Create the query-rewrite node using a LangChain OpenAI chat model.
 
     Input:
@@ -38,7 +38,7 @@ def build_rewrite_query_node(fast_llm: BaseChatModel):
     )
 
     from langchain_core.output_parsers import StrOutputParser
-    chain = prompt | fast_llm | StrOutputParser()
+    chain = prompt | llm | StrOutputParser()
     
     async def rewrite_query(state: AgentState) -> AgentState:
         """Expand the user question into technical retrieval terms.
@@ -67,7 +67,7 @@ def build_rewrite_query_node(fast_llm: BaseChatModel):
     return rewrite_query
 
 
-def build_retrieve_vulnerabilities_node(vector_store_client: QdrantVectorStoreClient):
+def build_retrieve_vulnerabilities_node(vectorstore: VectorStore):
     """Create the Qdrant retrieval node for inference.
 
     Input:
@@ -78,8 +78,6 @@ def build_retrieve_vulnerabilities_node(vector_store_client: QdrantVectorStoreCl
         Restricts graph retrieval to read-only Qdrant access and never performs
         indexing or mutation of stored vulnerability documents.
     """
-
-    vectorstore = vector_store_client.build_vector_store()
 
     async def retrieve_vulnerabilities(state: AgentState) -> AgentState:
         """Retrieve top-k vulnerability documents from Qdrant.
@@ -98,15 +96,15 @@ def build_retrieve_vulnerabilities_node(vector_store_client: QdrantVectorStoreCl
                 primary_documents=retrieved_documents,
                 secondary_documents=live_nvd_documents,
             )
-    
-        search_query = state.get("rewritten_query")
 
-        search_kwargs = {"k": 5}
+        from retrieval.base import SearchRequest, run_base_search
+
+        search_req = SearchRequest(k=5)
+        search_req.query = state.get("rewritten_query")
         if state.get("operating_system"):
-            search_kwargs["filter"] = {"platform": state.get("operating_system")}
+            search_req.filters["platform"] = state.get("operating_system")
 
-        retriever = vectorstore.as_retriever(search_kwargs=search_kwargs)
-        documents = await retriever.ainvoke(search_query)
+        documents = await run_base_search(vectorstore, search_req)
         return {
             **state,
             "retrieved_documents": documents,
@@ -115,7 +113,7 @@ def build_retrieve_vulnerabilities_node(vector_store_client: QdrantVectorStoreCl
     return retrieve_vulnerabilities
 
 
-def build_grade_documents_node(fast_llm: BaseChatModel):
+def build_grade_documents_node(llm: BaseChatModel):
     """Create the document-grading node using a fast LangChain OpenAI model.
 
     Input:
@@ -137,7 +135,7 @@ def build_grade_documents_node(fast_llm: BaseChatModel):
             ("human", "Retrieved document: \n\n {document} \n\n User query: {query}"),        
         ]
     )
-    chain = prompt | fast_llm.with_structured_output(GradeDecision)
+    chain = prompt | llm.with_structured_output(GradeDecision)
 
     async def grade_documents(state: AgentState) -> AgentState:
         """Mark the retrieved document set as relevant or irrelevant.
@@ -233,7 +231,7 @@ def build_fetch_live_nvd_node():
     return fetch_live_nvd
 
 
-def build_generate_remediation_node(synthesis_llm: BaseChatModel):
+def build_generate_remediation_node(llm: BaseChatModel):
     """Create the final remediation-generation node.
 
     Input:
@@ -256,7 +254,7 @@ def build_generate_remediation_node(synthesis_llm: BaseChatModel):
             "### 🔗 References\n(List the CVE IDs used)"
         ))
     ])
-    combine_chain = create_stuff_documents_chain(llm=synthesis_llm, prompt=prompt)
+    combine_chain = create_stuff_documents_chain(llm=llm, prompt=prompt)
 
     async def generate_remediation(state: AgentState) -> AgentState:
         """Generate the final remediation response from grounded evidence.
@@ -382,5 +380,3 @@ def _merge_documents(
         seen_keys.add(key)
         merged_documents.append(document)
     return merged_documents
-
-

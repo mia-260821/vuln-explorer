@@ -6,9 +6,10 @@ import argparse
 import asyncio
 import json
 
-from agents.graph import run_agent_graph
+from agents.usecase import run_agent_graph
 from config import AppConfig
 from ingestion.harvester import run_ingestion
+from ingestion.usecase import build_nvd_harvester
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +35,28 @@ def parse_args() -> argparse.Namespace:
         help="Optional software stack filters used during retrieval",
     )
     return parser.parse_args()
+
+
+async def run_ingestion(config: AppConfig) -> None:
+    """Run the standalone ingestion flow for NVD documents.
+
+    Input:
+        Application configuration with NVD, embeddings, and Qdrant settings.
+    Output:
+        Fetches NVD documents and incrementally upserts them into Qdrant.
+    Security context:
+        Keeps ingestion as a standalone write-time operation separate from the
+        read-only LangGraph inference workflow.
+    """
+
+    harvester = await build_nvd_harvester(config)
+    documents = await harvester.fetch_documents()
+
+    batch_size = 10
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i : i + batch_size]
+        await harvester.sync_documents(documents=batch)
+    return documents
 
 
 async def run() -> int:

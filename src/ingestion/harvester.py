@@ -8,38 +8,17 @@ from typing import Any, Optional
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
+from langchain_core.vectorstores import VectorStore
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from config import AppConfig
 from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
-from src.core.factory import get_collection_name, get_embedding_dimension, get_embeddings
+from src.core.factory import get_embedding_dimension
 
 
 logger = logging.getLogger(__name__)
-
-
-async def run_ingestion(config: AppConfig) -> None:
-    """Run the standalone ingestion flow for NVD documents.
-
-    Input:
-        Application configuration with NVD, embeddings, and Qdrant settings.
-    Output:
-        Fetches NVD documents and incrementally upserts them into Qdrant.
-    Security context:
-        Keeps ingestion as a standalone write-time operation separate from the
-        read-only LangGraph inference workflow.
-    """
-
-    harvester = NvdHarvester(config=config)
-    documents = await harvester.fetch_documents()
-
-    batch_size = 10
-    for i in range(0, len(documents), batch_size):
-        batch = documents[i : i + batch_size]
-        await harvester.sync_documents(documents=batch)
-    return documents
 
 
 class NvdHarvester:
@@ -58,7 +37,7 @@ class NvdHarvester:
 
     def __init__(
         self,
-        config: AppConfig,
+        vectorstore: VectorStore,
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         """Initialize the NVD harvester.
@@ -71,13 +50,8 @@ class NvdHarvester:
             Keeps network access explicit and configurable, avoiding hidden
             external dependencies during ingestion.
         """
-
-        self._config = config
         self._http_client = http_client
-        self._embeddings = get_embeddings()
-        self._client = QdrantClient(url=self._config.qdrant_url)
-        self._collection_name = get_collection_name(prefix=self._config.qdrant_collection)
-        self._vector_store: Optional[QdrantVectorStore] = None
+        self._vector_store = vectorstore
 
     async def fetch_documents(self, keyword_search: Optional[str] = None) -> list[Document]:
         """Fetch CVEs from the NVD API and map them into LangChain documents.
@@ -139,8 +113,7 @@ class NvdHarvester:
             return None
 
         try:
-            await asyncio.to_thread(self._ensure_collection_exists, self._client)
-            vector_store = self._get_vector_store()
+            vector_store = self._vector_store
             document_ids = [self._document_id(document=document) for document in documents]
             await asyncio.to_thread(
                 vector_store.add_documents,
@@ -149,66 +122,17 @@ class NvdHarvester:
             )
         except Exception:
             logger.exception(
-                "Failed to synchronize %s NVD documents into Qdrant collection '%s'.",
+                "Failed to synchronize %s NVD documents into Qdrant collection.",
                 len(documents),
-                self._collection_name,
             )
             raise
 
         logger.info(
-            "Synchronized %s NVD documents into Qdrant collection '%s'.",
+            "Synchronized %s NVD documents into Qdrant collection.",
             len(documents),
-            self._collection_name,
         )
         return vector_store
 
-    def _get_vector_store(self) -> QdrantVectorStore:
-        """Return a lazily initialized Qdrant vector store for the collection.
-
-        Input:
-            Uses the configured client, collection name, and embedding model.
-        Output:
-            Returns a `QdrantVectorStore` bound to the ensured collection.
-        Security context:
-            Delays vector-store construction until after collection creation so
-            ingestion does not probe or depend on a missing Qdrant collection.
-        """
-
-        if self._vector_store is None:
-            self._vector_store = QdrantVectorStore(
-                client=self._client,
-                collection_name=self._collection_name,
-                embedding=self._embeddings,
-                vector_name=self._config.qdrant_vector_name,
-            )
-        return self._vector_store
-
-    def _ensure_collection_exists(self, client: QdrantClient) -> None:
-        """Create the Qdrant collection only when it does not already exist.
-
-        Input:
-            A synchronous Qdrant client connected to the configured server.
-        Output:
-            Ensures the configured collection is ready for incremental upserts.
-        Security context:
-            Restricts collection management to the configured collection name so
-            ingestion cannot mutate unrelated vector data.
-        """
-
-        collections = client.get_collections()
-        existing_names = {collection.name for collection in collections.collections}
-        if self._collection_name in existing_names:
-            return
-
-        client.create_collection(
-            collection_name=self._collection_name,
-            vectors_config={
-                self._config.qdrant_vector_name: VectorParams(
-                    size=self._config.qdrant_vector_size or get_embedding_dimension(),
-                    distance=self._distance_enum(),
-                )
-            },
-        )
 
     def _document_id(self, document: Document) -> str:
         """Build a stable Qdrant point identifier for an ingested document.
@@ -226,28 +150,6 @@ class NvdHarvester:
         if cve_id:
             return str(uuid5(NAMESPACE_URL, f"cve:{cve_id}"))
         return str(uuid5(NAMESPACE_URL, document.page_content))
-
-    def _distance_enum(self) -> Distance:
-        """Translate configured distance text into a Qdrant distance enum.
-
-        Input:
-            Uses the configured Qdrant distance metric string.
-        Output:
-            Returns the matching Qdrant distance enum.
-        Security context:
-            Restricts collection schema creation to approved distance metrics.
-        """
-
-        mapping = {
-            "cosine": Distance.COSINE,
-            "dot": Distance.DOT,
-            "euclid": Distance.EUCLID,
-            "manhattan": Distance.MANHATTAN,
-        }
-        value = self._config.qdrant_distance.lower()
-        if value not in mapping:
-            raise ValueError("Unsupported Qdrant distance metric: {value}".format(value=value))
-        return mapping[value]
 
     def _cve_to_document(self, item: dict[str, Any]) -> Document:
         """Convert a single NVD CVE item into a LangChain document.
@@ -342,3 +244,4 @@ class NvdHarvester:
                         if text not in versions:
                             versions.append(text)
         return versions
+
