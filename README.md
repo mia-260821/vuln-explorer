@@ -70,20 +70,8 @@ Core modules:
 Copy the template and provide the required environment values:
 
 ```bash
-cp .env.template .env.dev
+cp .env.template .env
 ```
-
-Important variables include:
-
-- `QDRANT_URL`
-- `QDRANT_COLLECTION`
-- `MODEL_PROVIDER`
-- `EMBEDDING_MODEL`
-- `LANGFUSE_PUBLIC_KEY`
-- `LANGFUSE_SECRET_KEY`
-- `LANGFUSE_HOST`
-
-Secrets must remain in environment files or runtime configuration and should never be committed.
 
 ## Local Development
 
@@ -181,14 +169,6 @@ The current LangGraph pipeline is assembled in `src/agents/graph.py` and follows
 5. Generate a grounded remediation-oriented answer.
 
 This separation keeps write operations in ingestion and preserves a read-only inference path.
-
-## Testing
-
-Run the test suite with:
-
-```bash
-pytest -v
-```
 
 ## Screenshots
 

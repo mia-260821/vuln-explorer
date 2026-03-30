@@ -1,8 +1,7 @@
 
 from __future__ import annotations
 
-import httpx
-from typing import Any, Optional
+from typing import Any
 
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
@@ -11,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.vectorstores import VectorStore
 from agents.schema import AgentState, GradeDecision
+from agents.tools import fetch_live_nvd_tool
 
 
 def build_rewrite_query_node(llm: BaseChatModel):
@@ -222,22 +222,12 @@ def build_fetch_live_nvd_node():
             }
 
         query = state.get("rewritten_query") or state.get("query", "")
-        params: dict[str, Any] = {"resultsPerPage": 5}
-        if query:
-            params["keywordSearch"] = query
-
-        async with httpx.AsyncClient(
-            base_url="https://services.nvd.nist.gov",
-            timeout=30.0,
-        ) as client:
-            response = await client.get("/rest/json/cves/2.0", params=params)
-            response.raise_for_status()
-            payload = response.json()
-
-        live_nvd_documents = [
-            _nvd_item_to_document(item)
-            for item in payload.get("vulnerabilities", [])
-        ]
+        live_nvd_documents = await fetch_live_nvd_tool.ainvoke(
+            {
+                "query": query,
+                "results_per_page": 5,
+            }
+        )
         return {
             **state,
             "fallback_attempted": True,
@@ -247,7 +237,6 @@ def build_fetch_live_nvd_node():
         }
 
     return fetch_live_nvd
-
 
 def build_generate_remediation_node(llm: BaseChatModel):
     """Create the final remediation-generation node.
@@ -324,49 +313,6 @@ def grade_edge(state: AgentState) -> str:
 
     # Path C: Data is bad and we haven't checked API yet -> Try NVD
     return "irrelevant"
-
-
-def _nvd_item_to_document(item: dict[str, Any]) -> Document:
-    """Convert an NVD API vulnerability item into a LangChain document.
-
-    Input:
-        A single vulnerability object from the NVD `cves/2.0` API response.
-    Output:
-        Returns a LangChain `Document` for fallback evidence generation.
-    Security context:
-        Preserves source identifiers and CVSS data so fallback answers remain
-        attributable to authoritative NVD records.
-    """
-
-    cve = item.get("cve", {})
-    cve_id = str(cve.get("id", "unknown-cve"))
-
-    description = ""
-    for entry in cve.get("descriptions", []):
-        if entry.get("lang") == "en":
-            description = str(entry.get("value", ""))
-            break
-
-    cvss_score: Optional[float] = None
-    metrics = cve.get("metrics", {})
-    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
-        metric_list = metrics.get(key, [])
-        if metric_list:
-            base_score = metric_list[0].get("cvssData", {}).get("baseScore")
-            if base_score is not None:
-                cvss_score = float(base_score)
-                break
-
-    return Document(
-        page_content=description,
-        metadata={
-            "source": "nvd_live",
-            "cve_id": cve_id,
-            "cvss": cvss_score,
-        },
-    )
-
-
 def _merge_documents(
     primary_documents: list[Document],
     secondary_documents: list[Document],
